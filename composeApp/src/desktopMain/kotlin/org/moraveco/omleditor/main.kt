@@ -6,6 +6,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Square
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,6 +21,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.*
 import com.russhwolf.settings.PreferencesSettings
 import com.russhwolf.settings.Settings
+import jdk.jfr.internal.jfc.model.SettingsLog.flush
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import omleditor.composeapp.generated.resources.Res
 import omleditor.composeapp.generated.resources.oml
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea
@@ -31,8 +38,10 @@ import org.jetbrains.compose.resources.painterResource
 import java.awt.FileDialog
 import java.awt.Font
 import java.awt.Frame
+import java.io.BufferedWriter
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files.write
 import javax.swing.JOptionPane
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -123,6 +132,50 @@ sealed class EditorEvent {
     data object Paste : EditorEvent()
     data object RunCode : EditorEvent()
 }
+var currentProcess: Process? = null
+var processWriter: BufferedWriter? = null
+
+fun startProcessInteractively(
+    filePath: String,
+    onOutput: (String) -> Unit,
+    onProcessEnd: () -> Unit
+) {
+    try {
+        val omlExecutable = extractOMLExecutable()
+        val process = ProcessBuilder(omlExecutable.absolutePath, filePath)
+            .redirectErrorStream(true)
+            .start()
+
+        currentProcess = process
+        processWriter = process.outputStream.bufferedWriter()
+
+        thread {
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach {
+                    onOutput(it + "\n")
+                }
+            }
+            process.waitFor()
+            onProcessEnd()
+        }
+    } catch (e: Exception) {
+        onOutput("Error starting process: ${e.message}\n")
+        onProcessEnd()
+    }
+}
+
+fun sendInputToProcess(input: String) {
+    try {
+        processWriter?.apply {
+            write(input)
+            newLine()
+            flush()
+        }
+    } catch (e: Exception) {
+        println("Failed to send input: ${e.message}")
+    }
+}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -132,6 +185,7 @@ fun CodeEditorApp() {
     var consoleOutput by remember { mutableStateOf("") }
     var isRunning by remember { mutableStateOf(false) }
     val settings: PreferencesSettings = PreferencesSettings.Factory().create("settings")
+    val userInputs = remember { mutableStateListOf<String>() } // Uchovává uživatelské vstupy
 
     fun saveLastOpenedFile(path: String) {
         settings.putString("last_file", path)
@@ -142,14 +196,12 @@ fun CodeEditorApp() {
     }
 
     LaunchedEffect(Unit) {
-
-
         val lastOpened = loadLastOpenedFile()
         if (lastOpened != null) {
             try {
                 val content = File(lastOpened).readText()
                 fileContent = content
-                filePath = lastOpened // ✅ set the path here!
+                filePath = lastOpened
             } catch (e: IOException) {
                 fileContent = "// Could not load last file: ${e.message}"
             }
@@ -169,7 +221,7 @@ fun CodeEditorApp() {
                             val content = File(it).readText()
                             fileContent = content
                             filePath = it
-                            saveLastOpenedFile(it) // ✅ persist after opening
+                            saveLastOpenedFile(it)
                         } catch (e: IOException) {
                             JOptionPane.showMessageDialog(null, "Error reading file: ${e.message}")
                         }
@@ -202,12 +254,11 @@ fun CodeEditorApp() {
                         isRunning = true
                         consoleOutput = "Running...\n"
 
-                        // Simulate code execution in a separate thread
                         thread {
                             try {
-                                // This is just a simulation. In a real application, you would execute the code here.
-                                Thread.sleep(1000) // Simulate processing time
-                                consoleOutput += runLexerParser(filePath ?: "/Users/macos/CLionProjects/OML/newMain.oml")
+                                val result = runLexerParser(filePath ?: "/path/to/default.oml", userInputs)
+                                consoleOutput += result
+                                userInputs.clear() // Vymaže vstupy po skončení běhu
                             } catch (e: Exception) {
                                 consoleOutput += "Error: ${e.message}\n"
                             } finally {
@@ -218,12 +269,10 @@ fun CodeEditorApp() {
                 }
                 else -> {
                     // Handle other events like Undo, Redo, Cut, Copy, Paste
-                    // These would need more complex implementation
                 }
             }
         }
     }
-
 
     Column(
         modifier = Modifier.fillMaxSize()
@@ -238,18 +287,17 @@ fun CodeEditorApp() {
                         } catch (e: IOException) {
                             JOptionPane.showMessageDialog(null, "Error saving file: ${e.message}")
                         }
-
                     }
                     true
                 } else {
-                    false // Ignore event
+                    false
                 }
             }
     ) {
         TopAppBar(
             title = { Text("Code Editor - ${filePath ?: "Untitled"}") },
             colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = Color(39,49,52),
+                containerColor = Color(39, 49, 52),
                 titleContentColor = Color.White,
             ),
             actions = {
@@ -261,9 +309,12 @@ fun CodeEditorApp() {
 
                             thread {
                                 try {
-                                    // This is just a simulation. In a real application, you would execute the code here.
-                                    Thread.sleep(1000) // Simulate processing time
-                                    consoleOutput += runLexerParser(filePath ?: "/Users/macos/CLionProjects/OML/newMain.oml")
+                                    startProcessInteractively(
+                                        filePath ?: "/path/to/default.oml",
+                                        onOutput = { newOutput -> consoleOutput += newOutput },
+                                        onProcessEnd = { isRunning = false }
+                                    )
+                                    userInputs.clear()
                                 } catch (e: Exception) {
                                     consoleOutput += "Error: ${e.message}\n"
                                 } finally {
@@ -279,6 +330,17 @@ fun CodeEditorApp() {
                         tint = if (isRunning) Color.Gray else Color.Green
                     )
                 }
+                IconButton(
+                    onClick = {
+                        isRunning = false
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Square,
+                        contentDescription = "Stop",
+                        tint = if (!isRunning) Color.Gray else Color.Green
+                    )
+                }
             }
         )
 
@@ -290,9 +352,17 @@ fun CodeEditorApp() {
             )
         }
 
-        ConsolePanel(consoleOutput, isRunning)
+        ConsolePanel(
+            output = consoleOutput,
+            isRunning = isRunning,
+            onInputEntered = { input ->
+                sendInputToProcess(input)
+            }
+        )
     }
 }
+
+
 
 @Composable
 fun EditorWithSwing(
@@ -361,28 +431,87 @@ fun EditorWithSwing(
 }
 
 @Composable
-fun ConsolePanel(output: String, isRunning: Boolean) {
+fun ConsolePanel(output: String, isRunning: Boolean, onInputEntered: (String) -> Unit) {
+    var userInput by remember { mutableStateOf("") }
+    var terminalHistory by remember { mutableStateOf("") }
+    val scrollState = rememberScrollState()
+
+    // Append new output if it changed
+    LaunchedEffect(output) {
+        if (output.isNotBlank()) {
+            terminalHistory += "\n$output"
+        }
+    }
+
     Column(
         modifier = Modifier
-            .height(200.dp)
+            .height(250.dp)
             .fillMaxWidth()
             .background(Color(0xFF2B2B2B))
+            .padding(8.dp)
     ) {
-        Text("Console", color = Color.White, modifier = Modifier.padding(8.dp))
+        Text("Console", color = Color.White)
         Divider(color = Color.DarkGray)
 
-        Box(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(scrollState)
+        ) {
+            LaunchedEffect(terminalHistory) {
+                scrollState.animateScrollTo(scrollState.maxValue)
+            }
+
             Text(
-                text = output,
+                text = terminalHistory,
                 color = Color.White,
                 fontSize = 13.sp,
                 fontFamily = FontFamily.Monospace,
-                modifier = Modifier.verticalScroll(rememberScrollState())
+            )
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "> ",
+                color = Color.Green,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp
+            )
+
+            TextField(
+                value = userInput,
+                onValueChange = { userInput = it },
+                textStyle = LocalTextStyle.current.copy(
+                    fontFamily = FontFamily.Monospace,
+                    color = Color.White,
+                    fontSize = 13.sp
+                ),
+                colors = TextFieldDefaults.colors(
+                    unfocusedContainerColor = Color.Transparent,
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedTextColor = Color.White,
+                    focusedTextColor = Color.White,
+                    cursorColor = Color.Green
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .onKeyEvent {
+                        if (it.type == KeyEventType.KeyUp && it.key == Key.Enter) {
+                            val command = userInput.trim()
+                            terminalHistory += "\n> $command"
+                            if (command.isNotEmpty()) {
+                                onInputEntered(command) // Předá vstup do běžící aplikace
+                            }
+                            userInput = ""
+                            true
+                        } else false
+                    }
             )
 
             if (isRunning) {
                 CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(20.dp),
+                    modifier = Modifier.padding(start = 8.dp).size(16.dp),
                     color = MaterialTheme.colorScheme.primary,
                     strokeWidth = 2.dp
                 )
@@ -390,6 +519,10 @@ fun ConsolePanel(output: String, isRunning: Boolean) {
         }
     }
 }
+
+
+
+
 
 
 // File dialog to open a file
@@ -432,20 +565,51 @@ fun extractOMLExecutable(): File {
 }
 
 
-fun runLexerParser(filePath: String): String {
+fun runLexerParser(filePath: String, userInputStream: List<String>): String {
     return try {
         val omlExecutable = extractOMLExecutable()
         val process = ProcessBuilder(omlExecutable.absolutePath, filePath)
             .redirectErrorStream(true)
             .start()
 
-        val output = process.inputStream.bufferedReader().readText()
+        // Vstup a výstup procesu budou synchronně zpracovány
+        val inputThread = thread {
+            process.outputStream.bufferedWriter().use { writer ->
+                userInputStream.forEach { userInput ->
+                    writer.write(userInput)
+                    writer.newLine() // Každý řádek ukončíme
+                    writer.flush()
+                }
+            }
+        }
+
+        // Čtení výstupu z procesu (blokuje dokud proces neskončí)
+        val outputBuilder = StringBuilder()
+        val reader = process.inputStream.bufferedReader()
+
+        val outputThread = thread {
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                outputBuilder.appendLine(line)
+                // Optional: forward each line to the UI if you make `consoleOutput` a `MutableState<String>` or `MutableStateFlow`
+            }
+        }
+
+        // Ujistíme se, že vstupní vlákno je ukončeno před návratem výsledku
+        inputThread.join()
+
+        // Proces čeká na dokončení
         process.waitFor()
-        output
+
+        outputThread.join()
+        return outputBuilder.toString()
+
     } catch (e: Exception) {
         "Error running lexer/parser: ${e.message}"
     }
 }
+
+
 
 object ResourceUtils
 
