@@ -416,20 +416,36 @@ fun saveFileDialog(): String? {
     }
 }
 
+fun extractOMLExecutable(): File {
+    val osName = System.getProperty("os.name").lowercase()
+    val isWindows = osName.contains("win")
+    val omlResourcePath = if (isWindows) "/native/OML.exe" else "/native/OML"
+    val inputStream = ResourceUtils::class.java.getResourceAsStream(omlResourcePath)
+        ?: throw IllegalStateException("OML binary not found: $omlResourcePath")
+
+    val omlExecutable = File.createTempFile("oml_exec", if (isWindows) ".exe" else "")
+    omlExecutable.deleteOnExit()
+    omlExecutable.outputStream().use { inputStream.copyTo(it) }
+    omlExecutable.setExecutable(true)
+
+    return omlExecutable
+}
+
+
 fun runLexerParser(filePath: String): String {
     return try {
-        // Replace "my_lexer_parser" with the actual path to your lexer/parser executable
-        val omlPath = File("src/interpreter/OML").absolutePath
-        val process = ProcessBuilder(omlPath, filePath)
-            .redirectErrorStream(true) // Combine stdout and stderr
+        val omlExecutable = extractOMLExecutable()
+        val process = ProcessBuilder(omlExecutable.absolutePath, filePath)
+            .redirectErrorStream(true)
             .start()
 
-
-        // Capture the output (lexer/parser result)
         val output = process.inputStream.bufferedReader().readText()
-        process.waitFor() // Wait for the process to complete
+        process.waitFor()
         output
     } catch (e: Exception) {
         "Error running lexer/parser: ${e.message}"
     }
 }
+
+object ResourceUtils
+
